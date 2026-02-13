@@ -1,0 +1,6 @@
+{
+  "RedshiftMasterUsername": "admin",
+  "RedshiftMasterPassword": "[PASSWORD]",
+  "S3BucketName": "your-unique-bucket-name"
+}
+
