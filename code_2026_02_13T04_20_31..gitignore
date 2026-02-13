@@ -1,0 +1,21 @@
+# AWS Credentials
+*.pem
+*.key
+credentials
+config
+
+# Parameters
+parameters.json
+secrets.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
