@@ -1,0 +1,492 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete solution for CSV data pipeline: S3 -> Redshift -> QuickSight with VPC connectivity'
+
+Parameters:
+  RedshiftMasterUsername:
+    Type: String
+    Default: aadianil
+    Description: Master username for Redshift cluster
+    
+  RedshiftMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Master password for Redshift cluster (min 8 characters, must contain uppercase, lowercase, and number)
+    
+  RedshiftDatabaseName:
+    Type: String
+    Default: dev
+    Description: Name of the Redshift database
+    
+  RedshiftClusterIdentifier:
+    Type: String
+    Default: csv-data-cluster
+    Description: Unique identifier for the Redshift cluster
+    
+  S3BucketName:
+    Type: String
+    Default: redshift-bucket-artifacts
+    Description: S3 bucket name for CSV files (must be globally unique)
+    
+  CSVFileName:
+    Type: String
+    Default: meter.csv
+    Description: Name of the CSV file in S3
+    
+  QuickSightUsername:
+    Type: String
+    Description: QuickSight user name (e.g., username or username/namespace)
+    
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for VPC
+    
+  PublicSubnetCIDR:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: CIDR block for public subnet
+    
+  PrivateSubnetCIDR:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: CIDR block for private subnet
+
+Resources:
+  # ==================== VPC Configuration ====================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VPC'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-IGW'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicSubnet'
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PrivateSubnet'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicRT'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ==================== Security Groups ====================
+  RedshiftSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Redshift cluster
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          CidrIp: 0.0.0.0/0
+          Description: Allow Redshift access from anywhere
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          SourceSecurityGroupId: !Ref QuickSightSecurityGroup
+          Description: Allow QuickSight VPC connection
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-RedshiftSG'
+
+  QuickSightSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for QuickSight VPC connection
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          DestinationSecurityGroupId: !Ref RedshiftSecurityGroup
+          Description: Allow outbound to Redshift
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-QuickSightSG'
+
+  # ==================== S3 Bucket ====================
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-DataBucket'
+
+  # ==================== IAM Roles ====================
+  RedshiftRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-RedshiftRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: redshift.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonRedshiftAllCommandsFullAccess
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}'
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/*'
+
+  QuickSightRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-QuickSightRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: quicksight.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSQuicksightAthenaAccess
+      Policies:
+        - PolicyName: RedshiftAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - redshift:DescribeClusters
+                  - redshift:GetClusterCredentials
+                Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftClusterIdentifier}'
+        - PolicyName: EC2NetworkPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                Resource: '*'
+
+  # ==================== Redshift Subnet Group ====================
+  RedshiftSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Subnet group for Redshift cluster
+      SubnetIds:
+        - !Ref PublicSubnet
+        - !Ref PrivateSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-RedshiftSubnetGroup'
+
+  # ==================== Redshift Cluster ====================
+  RedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    DependsOn: AttachGateway
+    Properties:
+      ClusterIdentifier: !Ref RedshiftClusterIdentifier
+      ClusterType: single-node
+      NodeType: ra3.large
+      DBName: !Ref RedshiftDatabaseName
+      MasterUsername: !Ref RedshiftMasterUsername
+      MasterUserPassword: !Ref RedshiftMasterPassword
+      Port: 5439
+      PubliclyAccessible: false
+      VpcSecurityGroupIds:
+        - !Ref RedshiftSecurityGroup
+      ClusterSubnetGroupName: !Ref RedshiftSubnetGroup
+      IamRoles:
+        - !GetAtt RedshiftRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-RedshiftCluster'
+
+  # ==================== Lambda for Table Creation and Data Load ====================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-LambdaExecutionRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RedshiftDataAPIPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - redshift-data:ExecuteStatement
+                  - redshift-data:DescribeStatement
+                  - redshift-data:GetStatementResult
+                  - redshift:GetClusterCredentials
+                Resource: '*'
+
+  RedshiftSetupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-RedshiftSetup'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref RedshiftSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet
+      Environment:
+        Variables:
+          CLUSTER_IDENTIFIER: !Ref RedshiftClusterIdentifier
+          DATABASE_NAME: !Ref RedshiftDatabaseName
+          DB_USER: !Ref RedshiftMasterUsername
+          S3_PATH: !Sub 's3://${S3BucketName}/${CSVFileName}'
+          IAM_ROLE_ARN: !GetAtt RedshiftRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import time
+          import cfnresponse
+          
+          redshift_data = boto3.client('redshift-data')
+          
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  
+                  cluster_id = os.environ['CLUSTER_IDENTIFIER']
+                  database = os.environ['DATABASE_NAME']
+                  db_user = os.environ['DB_USER']
+                  s3_path = os.environ['S3_PATH']
+                  iam_role = os.environ['IAM_ROLE_ARN']
+                  
+                  # Create table
+                  create_table_sql = """
+                  CREATE TABLE IF NOT EXISTS interval_reads_2021 (
+                      meternumber VARCHAR(50),
+                      readdatetime VARCHAR(30),
+                      loadkw DECIMAL(10,2),
+                      loadkva DECIMAL(10,2),
+                      readingkwh DECIMAL(12,2),
+                      consumptionkwh DECIMAL(12,2),
+                      readingkvah DECIMAL(12,2),
+                      consumptionkvah DECIMAL(12,2),
+                      powerfactor DECIMAL(4,2),
+                      voltagekv DECIMAL(8,2),
+                      currentamps DECIMAL(10,2)
+                  );
+                  """
+                  
+                  response = redshift_data.execute_statement(
+                      ClusterIdentifier=cluster_id,
+                      Database=database,
+                      DbUser=db_user,
+                      Sql=create_table_sql
+                  )
+                  
+                  statement_id = response['Id']
+                  wait_for_completion(statement_id)
+                  
+                  # Load data from S3
+                  copy_sql = f"""
+                  COPY interval_reads_2021
+                  FROM '{s3_path}'
+                  IAM_ROLE '{iam_role}'
+                  DELIMITER ','
+                  IGNOREHEADER 1
+                  REMOVEQUOTES
+                  REGION 'us-east-1';
+                  """
+                  
+                  response = redshift_data.execute_statement(
+                      ClusterIdentifier=cluster_id,
+                      Database=database,
+                      DbUser=db_user,
+                      Sql=copy_sql
+                  )
+                  
+                  statement_id = response['Id']
+                  wait_for_completion(statement_id)
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'Message': 'Table created and data loaded successfully'
+                  })
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Message': str(e)
+                  })
+          
+          def wait_for_completion(statement_id, max_wait=300):
+              elapsed = 0
+              while elapsed < max_wait:
+                  response = redshift_data.describe_statement(Id=statement_id)
+                  status = response['Status']
+                  
+                  if status == 'FINISHED':
+                      return
+                  elif status in ['FAILED', 'ABORTED']:
+                      raise Exception(f"Statement failed: {response.get('Error', 'Unknown error')}")
+                  
+                  time.sleep(5)
+                  elapsed += 5
+              
+              raise Exception("Statement execution timeout")
+
+  TriggerRedshiftSetup:
+    Type: Custom::RedshiftSetup
+    DependsOn: RedshiftCluster
+    Properties:
+      ServiceToken: !GetAtt RedshiftSetupFunction.Arn
+
+  # ==================== QuickSight VPC Connection ====================
+  QuickSightVPCConnection:
+    Type: AWS::QuickSight::VPCConnection
+    Properties:
+      VPCConnectionId: !Sub '${AWS::StackName}-vpc-connection'
+      Name: !Sub '${AWS::StackName}-VPCConnection'
+      AwsAccountId: !Ref AWS::AccountId
+      SecurityGroupIds:
+        - !Ref QuickSightSecurityGroup
+      SubnetIds:
+        - !Ref PrivateSubnet
+      RoleArn: !GetAtt QuickSightRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-QuickSightVPC'
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-ID'
+
+  RedshiftClusterEndpoint:
+    Description: Redshift cluster endpoint
+    Value: !GetAtt RedshiftCluster.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-RedshiftEndpoint'
+
+  RedshiftClusterPort:
+    Description: Redshift cluster port
+    Value: !GetAtt RedshiftCluster.Endpoint.Port
+    Export:
+      Name: !Sub '${AWS::StackName}-RedshiftPort'
+
+  RedshiftJDBCURL:
+    Description: JDBC connection string for Redshift
+    Value: !Sub 'jdbc:redshift://${RedshiftCluster.Endpoint.Address}:${RedshiftCluster.Endpoint.Port}/${RedshiftDatabaseName}'
+
+  S3BucketName:
+    Description: S3 bucket for CSV files
+    Value: !Ref S3Bucket
+    Export:
+      Name: !Sub '${AWS::StackName}-S3Bucket'
+
+  RedshiftIAMRoleArn:
+    Description: IAM Role ARN for Redshift
+    Value: !GetAtt RedshiftRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RedshiftRoleArn'
+
+  QuickSightVPCConnectionId:
+    Description: QuickSight VPC Connection ID
+    Value: !Ref QuickSightVPCConnection
+    Export:
+      Name: !Sub '${AWS::StackName}-QuickSightVPCConnectionId'
+
+  QuickSightSecurityGroupId:
+    Description: Security Group ID for QuickSight
+    Value: !Ref QuickSightSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-QuickSightSG'
+
+  SetupInstructions:
+    Description: Next steps to complete the setup
+    Value: |
+      1. Upload your meter.csv file to the S3 bucket
+      2. Wait for Lambda to create table and load data (check CloudWatch Logs)
+      3. In QuickSight, create a new dataset using the VPC connection
+      4. Connect to Redshift using the endpoint and credentials provided
+      5. Select the 'interval_reads_2021' table to create visualizations
