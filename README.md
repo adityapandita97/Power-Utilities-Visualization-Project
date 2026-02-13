@@ -1,6 +1,8 @@
-# AWS CSV Data Pipeline: S3 → Redshift → QuickSight
+# AWS Data Pipeline for Power and Utilities Analytics 
 
-A complete Infrastructure-as-Code solution for building a data analytics pipeline that ingests CSV files from S3, loads them into Amazon Redshift, and visualizes the data using Amazon QuickSight.
+A complete Infrastructure-as-Code solution for building a data analytics pipeline that ingests CSV files from S3, loads them into Amazon Redshift, and visualizes the data using Amazon QuickSight
+
+S3 → Redshift → QuickSight
 
 ## 📋 Table of Contents
 
