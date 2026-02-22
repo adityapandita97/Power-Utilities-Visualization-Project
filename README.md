@@ -482,20 +482,6 @@ Contributions are welcome! Please follow these steps:
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 👥 Authors
-
-- **Your Name** - Initial work - [YourGitHub](https://github.com/your-username)
-
-## 🙏 Acknowledgments
-
-- AWS CloudFormation documentation
-- Amazon Redshift team for excellent documentation
-- Community contributors
-
 ---
 
 **Questions or Issues?** Please open an issue on GitHub or contact [adityapandita97@gmail.com]
